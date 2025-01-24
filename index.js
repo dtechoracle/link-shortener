@@ -9,7 +9,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// Important: this must be before any routes
 app.use(express.json());
 
 // Enhanced URL store with click tracking
