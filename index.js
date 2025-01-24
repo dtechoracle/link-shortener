@@ -1,198 +1,98 @@
 const express = require("express");
-const crypto = require("crypto");
-const { createClient } = require("redis");
 const { customAlphabet } = require("nanoid");
+const useragent = require("express-useragent");
+const requestIp = require("request-ip");
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-// In-memory store for testing
-const inMemoryStore = new Map();
-const inMemoryVisitors = new Map();
-
-// Create store based on environment
-const createStore = () => {
-  if (process.env.NODE_ENV === "test") {
-    return {
-      async set(key, value) {
-        inMemoryStore.set(key, value);
-      },
-      async get(key) {
-        return inMemoryStore.get(key);
-      },
-      async del(key) {
-        inMemoryStore.delete(key);
-      },
-      async clear() {
-        inMemoryStore.clear();
-        inMemoryVisitors.clear();
-      },
-      async addVisitor(urlId, visitor) {
-        const visitors = inMemoryVisitors.get(urlId) || new Set();
-        visitors.add(visitor);
-        inMemoryVisitors.set(urlId, visitors);
-        return visitors.size;
-      },
-      async getVisitors(urlId) {
-        return (inMemoryVisitors.get(urlId) || new Set()).size;
-      },
-      async incrementClicks(urlId) {
-        const data = inMemoryStore.get(urlId) || { clicks: 0 };
-        data.clicks = (data.clicks || 0) + 1;
-        inMemoryStore.set(urlId, data);
-        return data.clicks;
-      },
-    };
-  }
-
-  // Redis store for production
-  const client = createClient({
-    url: process.env.REDIS_URL || "redis://localhost:6379",
-    socket: {
-      reconnectStrategy: (retries) => {
-        if (retries > 10) {
-          console.error("Max Redis reconnection attempts reached");
-          return new Error("Max Redis reconnection attempts reached");
-        }
-        return Math.min(retries * 100, 3000);
-      },
-      connectTimeout: 10000, // 10 seconds
-    },
-  });
-
-  client.on("error", (err) => {
-    if (process.env.NODE_ENV !== "test") {
-      console.error("Redis Client Error:", err);
-    }
-  });
-
-  return {
-    client,
-    async connect() {
-      await client.connect();
-    },
-    async set(key, value) {
-      await client.hSet(key, value);
-    },
-    async get(key) {
-      return client.hGetAll(key);
-    },
-    async del(key) {
-      await client.del(key);
-    },
-    async clear() {
-      await client.flushDb();
-    },
-    async addVisitor(urlId, visitor) {
-      await client.sAdd(`visitors:${urlId}`, visitor);
-      return client.sCard(`visitors:${urlId}`);
-    },
-    async getVisitors(urlId) {
-      return client.sCard(`visitors:${urlId}`);
-    },
-    async incrementClicks(urlId) {
-      return client.hIncrBy(`url:${urlId}`, "clicks", 1);
-    },
-    async quit() {
-      if (client.isOpen) {
-        await client.quit();
-      }
-    },
-  };
-};
-
-const store = createStore();
-
-// Enable CORS for testing
-app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Headers", "Content-Type");
-  next();
-});
-
-app.use(express.json());
-
-// Create a custom nanoid function with a specific alphabet
+// Create nanoid with custom alphabet
 const nanoid = customAlphabet(
   "1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
   8
 );
 
-// Function to generate short ID
-function generateShortId(length = 6) {
-  return crypto
-    .randomBytes(length)
-    .toString("base64")
-    .replace(/[+/=]/g, "")
-    .substring(0, length);
-}
+// In-memory storage
+const urlStore = new Map();
+const visitorStore = new Map();
+const visitorDetailsStore = new Map();
 
-// Helper function to get client IP
-function getClientInfo(req) {
-  return {
-    ip: req.ip || req.connection.remoteAddress,
-    hostname: req.hostname,
-    timestamp: new Date().toLocaleString(),
-    userAgent: req.headers["user-agent"],
-    language: req.headers["accept-language"],
-    platform: req.headers["sec-ch-ua-platform"],
-    device: parseUserAgent(req.headers["user-agent"]),
-    screenResolution: req.headers["sec-ch-viewport-width"]
-      ? `${req.headers["sec-ch-viewport-width"]}x${req.headers["sec-ch-viewport-height"]}`
-      : "Unknown",
-  };
-}
+// Middleware
+app.use(express.json());
+app.use(useragent.express());
+app.use(requestIp.mw());
 
-// Helper function to parse user agent string
-function parseUserAgent(userAgent) {
-  if (!userAgent) return "Unknown Device";
+// Create store interface
+const store = {
+  async set(key, value) {
+    urlStore.set(key, value);
+  },
 
-  const details = {
-    device: "Unknown",
-    os: "Unknown",
-    browser: "Unknown",
-    isMobile: false,
-  };
+  async get(key) {
+    return urlStore.get(key);
+  },
 
-  // Operating System Detection
-  if (userAgent.includes("Windows")) {
-    details.os = "Windows";
-  } else if (userAgent.includes("Mac OS")) {
-    details.os = "MacOS";
-  } else if (userAgent.includes("Linux")) {
-    details.os = "Linux";
-  } else if (userAgent.includes("Android")) {
-    details.os = "Android";
-    details.isMobile = true;
-  } else if (userAgent.includes("iPhone") || userAgent.includes("iPad")) {
-    details.os = "iOS";
-    details.isMobile = true;
-  }
+  async clear() {
+    urlStore.clear();
+    visitorStore.clear();
+    visitorDetailsStore.clear();
+  },
 
-  // Browser Detection
-  if (userAgent.includes("Chrome")) {
-    details.browser = "Chrome";
-  } else if (userAgent.includes("Firefox")) {
-    details.browser = "Firefox";
-  } else if (userAgent.includes("Safari")) {
-    details.browser = "Safari";
-  } else if (userAgent.includes("Edge")) {
-    details.browser = "Edge";
-  }
+  async addVisitor(urlId, visitorInfo) {
+    // Get or initialize visitor sets
+    let visitors = visitorStore.get(urlId);
+    if (!visitors) {
+      visitors = new Set();
+      visitorStore.set(urlId, visitors);
+    }
 
-  // Device Type
-  if (userAgent.includes("Mobile")) {
-    details.device = "Mobile";
-  } else if (userAgent.includes("Tablet")) {
-    details.device = "Tablet";
-  } else {
-    details.device = "Desktop";
-  }
+    // Get or initialize visitor details array
+    let details = visitorDetailsStore.get(urlId);
+    if (!details) {
+      details = [];
+      visitorDetailsStore.set(urlId, details);
+    }
 
-  return details;
-}
+    // Add visitor to unique set using user agent as identifier
+    visitors.add(visitorInfo.userAgent);
 
-// URL shortening endpoint
+    // Add visit details
+    details.push({
+      ...visitorInfo,
+      timestamp: new Date().toISOString(),
+    });
+
+    // Get and update URL data
+    const urlData = await this.get(urlId);
+    if (urlData) {
+      urlData.uniqueVisitors = visitors.size;
+      await this.set(urlId, urlData);
+    }
+
+    return visitors.size;
+  },
+
+  async getVisitorDetails(urlId) {
+    return visitorDetailsStore.get(urlId) || [];
+  },
+
+  async getUniqueVisitorCount(urlId) {
+    const visitors = visitorStore.get(urlId);
+    return visitors ? visitors.size : 0;
+  },
+
+  async incrementClicks(urlId) {
+    const data = await this.get(urlId);
+    if (data) {
+      data.clicks = (data.clicks || 0) + 1;
+      await this.set(urlId, data);
+      return data.clicks;
+    }
+    return 0;
+  },
+};
+
+// Shorten URL endpoint
 app.post("/shorten", async (req, res) => {
   const { originalUrl } = req.body;
 
@@ -208,65 +108,102 @@ app.post("/shorten", async (req, res) => {
     uniqueVisitors: 0,
   };
 
-  try {
-    await store.set(`url:${shortId}`, urlData);
-    const shortUrl = `${req.protocol}://${req.get("host")}/${shortId}`;
-    res.json({ shortUrl, shortId });
-  } catch (error) {
-    res.status(500).json({ error: "Failed to create short URL" });
-  }
+  await store.set(shortId, urlData);
+  const shortUrl = `${req.protocol}://${req.get("host")}/${shortId}`;
+  res.json({ shortUrl, shortId });
 });
 
 // Redirect endpoint
 app.get("/:shortId", async (req, res) => {
   const { shortId } = req.params;
+  const urlData = await store.get(shortId);
 
-  try {
-    const urlData = await store.get(`url:${shortId}`);
-
-    if (!urlData || !urlData.originalUrl) {
-      return res.status(404).send("URL not found");
-    }
-
-    const userAgent = req.get("user-agent") || "unknown";
-    const clicks = await store.incrementClicks(shortId);
-    const uniqueVisitors = await store.addVisitor(shortId, userAgent);
-
-    await store.set(`url:${shortId}`, {
-      ...urlData,
-      clicks,
-      uniqueVisitors,
-    });
-
-    res.redirect(urlData.originalUrl);
-  } catch (error) {
-    res.status(500).send("Server error");
+  if (!urlData) {
+    return res.status(404).send("URL not found");
   }
+
+  const visitorInfo = {
+    ip: req.clientIp,
+    userAgent: req.get("user-agent") || "unknown",
+    browser: {
+      name: req.useragent.browser,
+      version: req.useragent.version,
+    },
+    os: {
+      name: req.useragent.os,
+      version: req.useragent.platform,
+    },
+    device: {
+      type: req.useragent.isMobile
+        ? "mobile"
+        : req.useragent.isTablet
+        ? "tablet"
+        : req.useragent.isDesktop
+        ? "desktop"
+        : "unknown",
+    },
+    referer: req.get("referer") || "direct",
+  };
+
+  await store.incrementClicks(shortId);
+  await store.addVisitor(shortId, visitorInfo);
+
+  res.redirect(urlData.originalUrl);
 });
 
 // Analytics endpoint
 app.get("/analytics/:shortId", async (req, res) => {
   const { shortId } = req.params;
+  const urlData = await store.get(shortId);
 
-  try {
-    const urlData = await store.get(`url:${shortId}`);
-
-    if (!urlData || !urlData.originalUrl) {
-      return res.status(404).json({ error: "URL not found" });
-    }
-
-    res.json({
-      originalUrl: urlData.originalUrl,
-      created: parseInt(urlData.created),
-      clicks: parseInt(urlData.clicks),
-      uniqueVisitors: parseInt(urlData.uniqueVisitors),
-    });
-  } catch (error) {
-    res.status(500).json({ error: "Failed to get analytics" });
+  if (!urlData) {
+    return res.status(404).json({ error: "URL not found" });
   }
+
+  const visitorDetails = await store.getVisitorDetails(shortId);
+  const uniqueVisitors = await store.getUniqueVisitorCount(shortId);
+
+  // Process visitor details for analytics
+  const browsers = {};
+  const operatingSystems = {};
+  const devices = {};
+  const hourlyClicks = {};
+
+  visitorDetails.forEach((visitor) => {
+    // Count browsers
+    browsers[visitor.browser.name] = (browsers[visitor.browser.name] || 0) + 1;
+
+    // Count operating systems
+    operatingSystems[visitor.os.name] =
+      (operatingSystems[visitor.os.name] || 0) + 1;
+
+    // Count device types
+    devices[visitor.device.type] = (devices[visitor.device.type] || 0) + 1;
+
+    // Track hourly clicks
+    const hour = new Date(visitor.timestamp).getHours();
+    hourlyClicks[hour] = (hourlyClicks[hour] || 0) + 1;
+  });
+
+  res.json({
+    urlInfo: {
+      originalUrl: urlData.originalUrl,
+      created: urlData.created,
+      shortId,
+    },
+    analytics: {
+      totalClicks: urlData.clicks,
+      uniqueVisitors,
+      browsers,
+      operatingSystems,
+      devices,
+      hourlyClicks,
+    },
+    recentVisitors: visitorDetails.slice(-10).reverse(), // Last 10 visitors
+  });
 });
 
-// Only start the server if not in test environment
+// Start server
 let server;
 if (process.env.NODE_ENV !== "test") {
   server = app.listen(port, () => {
@@ -281,18 +218,7 @@ if (process.env.NODE_ENV !== "test") {
     `);
   });
 } else {
-  const testPort = process.env.TEST_PORT || 0;
-  server = app.listen(testPort);
+  server = app.listen(0);
 }
-
-// Graceful shutdown
-process.on("SIGTERM", async () => {
-  console.log("Received SIGTERM. Performing graceful shutdown...");
-  await store.quit();
-  server.close(() => {
-    console.log("Server closed");
-    process.exit(0);
-  });
-});
 
 module.exports = { app, server, store };
