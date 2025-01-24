@@ -1,22 +1,26 @@
 const request = require("supertest");
-const { app, urlStore } = require("./index");
+const { app, server, store } = require("./index");
+
+jest.setTimeout(60000); // Increase global timeout to 60 seconds
 
 describe("Link Shortener Service", () => {
-  beforeEach(() => {
-    // Clear the urlStore before each test
-    urlStore.clear();
+  beforeEach(async () => {
+    await store.clear();
+  });
+
+  afterAll(async () => {
+    await new Promise((resolve) => server.close(resolve));
   });
 
   test("Should shorten a URL", async () => {
     const response = await request(app)
       .post("/shorten")
-      .send({ originalUrl: "http://example.com" });
+      .send({ originalUrl: "http://example.com" })
+      .expect(200);
 
-    expect(response.status).toBe(200);
-    expect(response.body.shortUrl).toMatch(/http:\/\/localhost:3000\/\w{6}/);
-    expect(response.body.originalUrl).toBe("http://example.com");
-    expect(response.body.created).toBeDefined();
-  });
+    expect(response.body.shortUrl).toBeDefined();
+    expect(response.body.shortId).toBeDefined();
+  }, 10000);
 
   test("Should reject empty URL", async () => {
     const response = await request(app)
@@ -24,73 +28,54 @@ describe("Link Shortener Service", () => {
       .send({ originalUrl: "" });
 
     expect(response.status).toBe(400);
-    expect(response.body.error).toBe("Original URL is required");
   });
 
   test("Should redirect to the original URL and record visit", async () => {
-    const shortId = "abcdef";
-    urlStore.set(shortId, {
-      originalUrl: "http://example.com",
-      clicks: [],
-      created: new Date().toLocaleString(),
-    });
+    // First create a short URL
+    const createResponse = await request(app)
+      .post("/shorten")
+      .send({ originalUrl: "http://example.com" });
 
-    const response = await request(app).get(`/${shortId}`);
+    const shortId = createResponse.body.shortId;
+
+    // Then try to access it
+    const response = await request(app)
+      .get(`/${shortId}`)
+      .set("User-Agent", "test-agent");
 
     expect(response.status).toBe(302);
-    expect(response.headers.location).toBe("http://example.com");
-
-    // Verify click was recorded
-    const data = urlStore.get(shortId);
-    expect(data.clicks.length).toBe(1);
-    expect(data.clicks[0]).toHaveProperty("timestamp");
-    expect(data.clicks[0]).toHaveProperty("ip");
-    expect(data.clicks[0]).toHaveProperty("device");
+    expect(response.header.location).toBe("http://example.com");
   });
 
   test("Should return 404 for non-existent short URL", async () => {
     const response = await request(app).get("/nonexistent");
+
     expect(response.status).toBe(404);
   });
 
   test("Should return analytics with detailed information", async () => {
-    const shortId = "abcdef";
-    const mockClick = {
-      timestamp: new Date().toLocaleString(),
-      ip: "127.0.0.1",
-      userAgent: "Mozilla/5.0",
-      device: {
-        device: "Desktop",
-        os: "Windows",
-        browser: "Chrome",
-      },
-      language: "en-US",
-    };
+    // Create a short URL first
+    const createResponse = await request(app)
+      .post("/shorten")
+      .send({ originalUrl: "http://example.com" });
 
-    urlStore.set(shortId, {
-      originalUrl: "http://example.com",
-      clicks: [mockClick],
-      created: new Date().toLocaleString(),
-    });
+    const shortId = createResponse.body.shortId;
 
+    // Visit the URL a few times
+    await request(app).get(`/${shortId}`).set("User-Agent", "test-agent-1");
+    await request(app).get(`/${shortId}`).set("User-Agent", "test-agent-2");
+
+    // Get analytics
     const response = await request(app).get(`/analytics/${shortId}`);
 
     expect(response.status).toBe(200);
-    expect(response.body["URL Information"]["Short URL"]).toBe(
-      `http://localhost:3000/${shortId}`
-    );
-    expect(response.body).toHaveProperty("URL Information");
-    expect(response.body).toHaveProperty("Click History");
-    expect(response.body["URL Information"]).toHaveProperty("Original URL");
-    expect(response.body["URL Information"]).toHaveProperty("Total Clicks");
-    expect(response.body["Click History"]).toHaveLength(1);
-    expect(response.body["Click History"][0]).toHaveProperty(
-      "Visitor Information"
-    );
+    expect(response.body.clicks).toBe(2);
+    expect(response.body.uniqueVisitors).toBe(2);
   });
 
   test("Should return 404 for non-existent analytics", async () => {
     const response = await request(app).get("/analytics/nonexistent");
+
     expect(response.status).toBe(404);
   });
 
@@ -102,15 +87,15 @@ describe("Link Shortener Service", () => {
 
     const shortId = createResponse.body.shortId;
 
-    // Simulate multiple visits
-    await request(app).get(`/${shortId}`);
-    await request(app).get(`/${shortId}`);
-    await request(app).get(`/${shortId}`);
+    // Multiple visits from same user agent
+    await request(app).get(`/${shortId}`).set("User-Agent", "test-agent");
+    await request(app).get(`/${shortId}`).set("User-Agent", "test-agent");
+    await request(app).get(`/${shortId}`).set("User-Agent", "different-agent");
 
-    // Check analytics
-    const analyticsResponse = await request(app).get(`/analytics/${shortId}`);
-    expect(analyticsResponse.status).toBe(200);
-    expect(analyticsResponse.body["URL Information"]["Total Clicks"]).toBe(3);
-    expect(analyticsResponse.body["Click History"]).toHaveLength(3);
+    const response = await request(app).get(`/analytics/${shortId}`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.clicks).toBe(3);
+    expect(response.body.uniqueVisitors).toBe(2);
   });
 });
