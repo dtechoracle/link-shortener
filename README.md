@@ -25,18 +25,14 @@ A robust URL shortening service built with Node.js and Express that includes ana
 
 1. Clone the repository:
 
-git clone <repository-url>
+git clone "https://github.com/dtechoracle/link-shortener.git"
 cd link-shortener
 
 2. Install dependencies:
 
 npm install
 
-3. Set up your environment variables:
-
-cp .env.example .env
-
-4. Run the development server:
+3. Run the development server:
 
 node index.js
 
