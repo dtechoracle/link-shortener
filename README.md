@@ -78,6 +78,16 @@ Response:
 
 you should get a json response with the analytics data for the short URL. This will show you the number of clicks and visitor information for the short URL.
 
+# For Unit Testing
+
+To run the unit tests, use the following command:
+
+npm test
+
+This will run the tests and give you the results.
+
+# For Contribution
+
 Incase you would like to contribute to this project, you can do so by cloning the repository and making the changes you would like to see.
 
 1. Fork the repository
