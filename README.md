@@ -15,11 +15,13 @@ A robust URL shortening service built with Node.js and Express that includes ana
 - View hourly click distribution
 - Track unique visitors
 - View recent visitor history
+- PostgreAQL database for persistent storage
 
 ## Prerequisites
 
 - Node.js (v14 or higher)
 - npm (Node Package Manager)
+- PostgreSQL (V12 or higher)
 
 ## Installation
 
@@ -32,7 +34,23 @@ cd link-shortener
 
 npm install
 
-3. Run the development server:
+3. Create a .env file in the root directory and add the following variables:
+
+DB_USER=postgres
+DB_HOST=localhost
+DB_NAME=url_shortener
+DB_PASSWORD=your_password
+DB_PORT=your_port
+
+4. Create the database:
+
+sql: CREATE DATABASE url_shortener;
+
+5. Run migrations:
+
+npm run migrate
+
+5. Run the development server:
 
 node index.js
 

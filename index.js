@@ -2,6 +2,7 @@ const express = require("express");
 const { customAlphabet } = require("nanoid");
 const useragent = require("express-useragent");
 const requestIp = require("request-ip");
+const urlService = require("./services/urlService");
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -94,113 +95,55 @@ const store = {
 
 // Shorten URL endpoint
 app.post("/shorten", async (req, res) => {
-  const { originalUrl } = req.body;
+  try {
+    const { originalUrl } = req.body;
+    const url = await urlService.createShortUrl(originalUrl);
 
-  if (!originalUrl) {
-    return res.status(400).json({ error: "URL is required" });
+    res.json({
+      shortUrl: `http://${req.get("host")}/${url.short_id}`,
+      shortId: url.short_id,
+    });
+  } catch (error) {
+    res.status(500).json({ error: "Error creating short URL" });
   }
-
-  const shortId = nanoid();
-  const urlData = {
-    originalUrl,
-    created: Date.now(),
-    clicks: 0,
-    uniqueVisitors: 0,
-  };
-
-  await store.set(shortId, urlData);
-  const shortUrl = `${req.protocol}://${req.get("host")}/${shortId}`;
-  res.json({ shortUrl, shortId });
 });
 
 // Redirect endpoint
 app.get("/:shortId", async (req, res) => {
-  const { shortId } = req.params;
-  const urlData = await store.get(shortId);
+  try {
+    const originalUrl = await urlService.getOriginalUrl(req.params.shortId);
 
-  if (!urlData) {
-    return res.status(404).send("URL not found");
+    if (!originalUrl) {
+      return res.status(404).json({ error: "URL not found" });
+    }
+
+    const visitorInfo = {
+      ip: req.clientIp,
+      userAgent: req.headers["user-agent"],
+      referrer: req.headers.referer || "",
+      browser: req.useragent.browser,
+      os: req.useragent.os,
+      deviceType: req.useragent.isMobile ? "mobile" : "desktop",
+    };
+
+    await urlService.trackVisit(req.params.shortId, visitorInfo);
+    res.redirect(originalUrl);
+  } catch (error) {
+    res.status(500).json({ error: "Server error" });
   }
-
-  const visitorInfo = {
-    ip: req.clientIp,
-    userAgent: req.get("user-agent") || "unknown",
-    browser: {
-      name: req.useragent.browser,
-      version: req.useragent.version,
-    },
-    os: {
-      name: req.useragent.os,
-      version: req.useragent.platform,
-    },
-    device: {
-      type: req.useragent.isMobile
-        ? "mobile"
-        : req.useragent.isTablet
-        ? "tablet"
-        : req.useragent.isDesktop
-        ? "desktop"
-        : "unknown",
-    },
-    referer: req.get("referer") || "direct",
-  };
-
-  await store.incrementClicks(shortId);
-  await store.addVisitor(shortId, visitorInfo);
-
-  res.redirect(urlData.originalUrl);
 });
 
 // Analytics endpoint
 app.get("/analytics/:shortId", async (req, res) => {
-  const { shortId } = req.params;
-  const urlData = await store.get(shortId);
-
-  if (!urlData) {
-    return res.status(404).json({ error: "URL not found" });
+  try {
+    const analytics = await urlService.getAnalytics(req.params.shortId);
+    if (!analytics) {
+      return res.status(404).json({ error: "URL not found" });
+    }
+    res.json(analytics);
+  } catch (error) {
+    res.status(500).json({ error: "Error fetching analytics" });
   }
-
-  const visitorDetails = await store.getVisitorDetails(shortId);
-  const uniqueVisitors = await store.getUniqueVisitorCount(shortId);
-
-  // Process visitor details for analytics
-  const browsers = {};
-  const operatingSystems = {};
-  const devices = {};
-  const hourlyClicks = {};
-
-  visitorDetails.forEach((visitor) => {
-    // Count browsers
-    browsers[visitor.browser.name] = (browsers[visitor.browser.name] || 0) + 1;
-
-    // Count operating systems
-    operatingSystems[visitor.os.name] =
-      (operatingSystems[visitor.os.name] || 0) + 1;
-
-    // Count device types
-    devices[visitor.device.type] = (devices[visitor.device.type] || 0) + 1;
-
-    // Track hourly clicks
-    const hour = new Date(visitor.timestamp).getHours();
-    hourlyClicks[hour] = (hourlyClicks[hour] || 0) + 1;
-  });
-
-  res.json({
-    urlInfo: {
-      originalUrl: urlData.originalUrl,
-      created: urlData.created,
-      shortId,
-    },
-    analytics: {
-      totalClicks: urlData.clicks,
-      uniqueVisitors,
-      browsers,
-      operatingSystems,
-      devices,
-      hourlyClicks,
-    },
-    recentVisitors: visitorDetails.slice(-10).reverse(), // Last 10 visitors
-  });
 });
 
 // Start server
